@@ -1,10 +1,29 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"sync/atomic"
 )
+
+type ApiBody struct {
+	Body string `json:"body"`
+}
+
+type ApiErrResponse struct {
+	Error string `json:"error"`
+}
+
+type ApiSuccessResponse struct {
+	Valid bool `json:"valid"`
+}
+
+type ApiSanitizedResponse struct {
+	Valid string `json:"cleaned_body"`
+}
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
@@ -54,6 +73,7 @@ func newAPIRouter(hitConfig *apiConfig) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", healthHandler)
+	mux.HandleFunc("POST /validate_chirp", validateChirp)
 
 	return apiMiddleware(mux) // attach middleware once
 }
@@ -65,6 +85,47 @@ func newAdminRouter(hitConfig *apiConfig) http.Handler {
 	mux.HandleFunc(("POST /reset"), func(w http.ResponseWriter, r *http.Request) { resetMetrics(w, r, hitConfig) })
 
 	return apiMiddleware(mux) // attach middleware once
+}
+
+func validateChirp(res http.ResponseWriter, req *http.Request) {
+	decoder := json.NewDecoder(req.Body)
+	body := ApiBody{}
+	res.Header().Set("Content-Type", "application/json")
+	err := decoder.Decode(&body)
+	if err != nil {
+		resBody := ApiErrResponse{
+			Error: "Something went wrong",
+		}
+		dat, _ := json.Marshal(resBody)
+		res.WriteHeader(500)
+		res.Write(dat)
+	} else if len(body.Body) > 140 {
+		resBody := ApiErrResponse{
+			Error: "Chirp is too long",
+		}
+		dat, _ := json.Marshal(resBody)
+		res.WriteHeader(400)
+		res.Write(dat)
+	} else {
+		resBody := ApiSanitizedResponse{
+			Valid: sanitizeVal(body.Body),
+		}
+		dat, _ := json.Marshal(resBody)
+		res.WriteHeader(200)
+		res.Write(dat)
+	}
+}
+
+func sanitizeVal(dat string) string {
+	datArr := strings.Split(dat, " ")
+	badWords := []string{"kerfuffle", "sharbert", "fornax"}
+	for i := 0; i < len(datArr); i++ {
+		foo := datArr[i]
+		if slices.Contains(badWords, strings.ToLower(foo)) {
+			datArr[i] = "****"
+		}
+	}
+	return strings.Join(datArr, " ")
 }
 
 func resetMetrics(res http.ResponseWriter, req *http.Request, config *apiConfig) {
