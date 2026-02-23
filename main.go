@@ -1,12 +1,17 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"main/m/internal/database"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
+
+	"github.com/joho/godotenv"
 )
 
 type ApiBody struct {
@@ -27,6 +32,7 @@ type ApiSanitizedResponse struct {
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	db             *database.Queries
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -38,19 +44,21 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 
 func apiMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-
-		println("API:", r.Method, r.URL.Path)
-
-		// future:
-		// auth
-		// rate limit
-		// headers
-
 		next.ServeHTTP(w, r)
 	})
 }
 
+func (hitConfig *apiConfig) connectDb() {
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		fmt.Printf("Error in db connection: %d", err)
+	}
+	hitConfig.db = database.New(db)
+}
+
 func main() {
+	godotenv.Load()
 	serveMux := http.NewServeMux()
 	routes(serveMux)
 	server := http.Server{
@@ -62,32 +70,33 @@ func main() {
 
 func routes(mux *http.ServeMux) {
 	hitConfig := apiConfig{}
+	hitConfig.connectDb()
 	mux.Handle("/app/", hitConfig.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 
 	// mount api router
-	mux.Handle("/admin/", http.StripPrefix("/admin", newAdminRouter(&hitConfig)))
-	mux.Handle("/api/", http.StripPrefix("/api", newAPIRouter(&hitConfig)))
+	mux.Handle("/admin/", http.StripPrefix("/admin", hitConfig.newAdminRouter()))
+	mux.Handle("/api/", http.StripPrefix("/api", hitConfig.newAPIRouter()))
 }
 
-func newAPIRouter(hitConfig *apiConfig) http.Handler {
+func (hitConfig *apiConfig) newAPIRouter() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /healthz", healthHandler)
-	mux.HandleFunc("POST /validate_chirp", validateChirp)
+	mux.HandleFunc("GET /healthz", hitConfig.healthHandler)
+	mux.HandleFunc("POST /validate_chirp", hitConfig.validateChirp)
 
 	return apiMiddleware(mux) // attach middleware once
 }
 
-func newAdminRouter(hitConfig *apiConfig) http.Handler {
+func (hitConfig *apiConfig) newAdminRouter() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) { getMetrics(w, r, hitConfig) })
-	mux.HandleFunc(("POST /reset"), func(w http.ResponseWriter, r *http.Request) { resetMetrics(w, r, hitConfig) })
+	mux.HandleFunc("GET /metrics", hitConfig.getMetrics)
+	mux.HandleFunc(("POST /reset"), hitConfig.resetMetrics)
 
 	return apiMiddleware(mux) // attach middleware once
 }
 
-func validateChirp(res http.ResponseWriter, req *http.Request) {
+func (hitConfig *apiConfig) validateChirp(res http.ResponseWriter, req *http.Request) {
 	decoder := json.NewDecoder(req.Body)
 	body := ApiBody{}
 	res.Header().Set("Content-Type", "application/json")
@@ -128,20 +137,20 @@ func sanitizeVal(dat string) string {
 	return strings.Join(datArr, " ")
 }
 
-func resetMetrics(res http.ResponseWriter, req *http.Request, config *apiConfig) {
-	config.fileserverHits.Store(0)
+func (hitConfig *apiConfig) resetMetrics(res http.ResponseWriter, req *http.Request) {
+	hitConfig.fileserverHits.Store(0)
 	res.WriteHeader(200)
 	res.Write([]byte{})
 }
 
-func getMetrics(res http.ResponseWriter, req *http.Request, config *apiConfig) {
+func (hitConfig *apiConfig) getMetrics(res http.ResponseWriter, req *http.Request) {
 	res.Header().Set("Content-Type", "text/html")
 	res.WriteHeader(200)
-	response := fmt.Sprintf("<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>", config.fileserverHits.Load())
+	response := fmt.Sprintf("<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>", hitConfig.fileserverHits.Load())
 	res.Write([]byte(response))
 }
 
-func healthHandler(res http.ResponseWriter, req *http.Request) {
+func (hitConfig *apiConfig) healthHandler(res http.ResponseWriter, req *http.Request) {
 	res.Header().Add("Content-Type", "text/plain; charset=utf-8")
 	res.WriteHeader(200)
 	res.Write([]byte("OK"))
